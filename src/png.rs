@@ -1,6 +1,8 @@
 use core::panic;
+use std::io::Read;
 
 use byteorder::{BigEndian, ByteOrder};
+use flate2::bufread::ZlibDecoder;
 
 // See https://www.w3.org/TR/REC-png.pdf
 
@@ -27,8 +29,14 @@ const CHUNK_TYPE_LAST_MODIFICATION_DATE: [u8; 4] = [0x74, 0x49, 0x4d, 0x45];
 // CHUNK_TYPE_BACKGROUND_COLOR represents the signature of a background color chunk type
 const CHUNK_TYPE_BACKGROUND_COLOR: [u8; 4] = [0x62, 0x4b, 0x47, 0x44];
 
+// CHUNK_TYPE_TEXT represents the signature of a text chunk type
+const CHUNK_TYPE_TEXT: [u8; 4] = [0x74, 0x45, 0x58, 0x74];
+
 // CHUNK_TYPE_IDAT represents the signature of an IDAT chunk type
 const CHUNK_TYPE_IDAT: [u8; 4] = [0x49, 0x44, 0x41, 0x54];
+
+// CHUNK_TYPE_END represents the signature of a end chunk type
+const CHUNK_TYPE_END: [u8; 4] = [0x49, 0x45, 0x4E, 0x44];
 
 // SIGNATURE_LENGTH represents the PNG signature length (8 bytes)
 const SIGNATURE_LENGTH: usize = 8;
@@ -130,6 +138,33 @@ impl ToString for BackgroundColor {
 struct ImageData {
     content: Vec<u8>,
     crc: [u8; 4]
+}
+
+impl ToString for ImageData {
+    fn to_string(&self) -> String {
+        return format!("## Image data\nCRC: {:?}", self.crc);
+    }
+}
+
+struct Text {
+    content: Vec<u8>,
+    crc: [u8; 4]
+}
+
+impl ToString for Text {
+    fn to_string(&self) -> String {
+        return format!("## Text\nContent: {}\nCRC: {:?}", String::from_utf8(self.content.clone()).unwrap(), self.crc);
+    }
+}
+
+struct End {
+    crc: [u8; 4]
+}
+
+impl ToString for End {
+    fn to_string(&self) -> String {
+        return format!("## End\nCRC: {:?}", self.crc);
+    }
 }
 
 /// new returns a new instance of a PNG struct
@@ -242,21 +277,54 @@ fn decode_chunk_background_color(buf: &[u8], data_length: usize) -> BackgroundCo
     }
 }
 
-/// decode_chunk_image_data decodes the image data chunk of the given content
+/// decode_chunk_text decodes the text chunk of the given content
 /// 
 /// buf is an array of byte and data_length is the number of byte to read from buf
-fn decode_chunk_image_data(buf: &[u8], data_length: usize) -> ImageData {
-    let test = &buf[..data_length];
-    for b in test {
-        print!("{:#x} ", b)
-    }
-    println!("");
-
+fn decode_chunk_text(buf: &[u8], data_length: usize) -> Text {
     let mut crc: [u8; 4] = [0; 4];
     crc.copy_from_slice(&buf[data_length..data_length+CHUNK_CRC_SIZE]);
 
-    return ImageData { 
+    return Text {
         content: buf[..data_length].to_vec(),
+        crc: crc
+    }
+}
+
+/// decode_chunk_end decodes the end chunk of the given content
+/// 
+/// buf is an array of byte and data_length is the number of byte to read from buf
+fn decode_chunk_end(buf: &[u8], data_length: usize) -> End {
+    let mut crc: [u8; 4] = [0; 4];
+    crc.copy_from_slice(&buf[data_length..data_length+CHUNK_CRC_SIZE]);
+
+    return End {
+        crc: crc
+    }
+}
+
+/// decode_chunk_image_data decodes the image data chunk of the given content
+/// 
+/// buf is an array of byte and data_length is the number of byte to read from buf
+///
+/// buf must be a single Zlib compressed stream
+fn decode_chunk_image_data(buf: &[u8], data_length: usize) -> ImageData {
+    println!("CMF: {:#x}", buf[0]);
+    println!("FLG: {:#x}", buf[1]);
+    if buf.starts_with(&[0x78, 0xDA]) { // TODO func
+        println!("ZLIB");
+    }
+
+    let mut decoder = ZlibDecoder::new(buf);
+    let mut decompressed = Vec::new();
+    decoder.read_to_end(&mut decompressed);
+    let decompressed_len: usize = decompressed.len();
+    println!("Decompressed : {:?}", decompressed_len);
+
+    let mut crc: [u8; 4] = [0; 4];
+    crc.copy_from_slice(&decompressed[decompressed_len-CHUNK_CRC_SIZE..decompressed_len]);
+
+    return ImageData { 
+        content: decompressed,
         crc: crc
     }
 }
@@ -279,7 +347,7 @@ impl Png {
         loop {
             let chunk_length: u32 = BigEndian::read_u32(&content[u_read..u_read+CHUNK_LENGTH_SIZE]);
             let u_chunk_length: usize = usize::try_from(chunk_length).unwrap();
-            println!("Chunk length: {u_chunk_length}");
+            println!("\nChunk length: {u_chunk_length}");
 
             let chunk_type: &[u8] = &content[u_read+CHUNK_LENGTH_SIZE..u_read+CHUNK_LENGTH_SIZE+CHUNK_TYPE_SIZE];
 
@@ -288,23 +356,31 @@ impl Png {
 
             if chunk_type.cmp(&CHUNK_TYPE_GAMA).is_eq() {
                 let chunk: Gama = decode_chunk_gama(chunk_content, u_chunk_length);
-                println!("\n{}", chunk.to_string());
+                println!("{}", chunk.to_string());
             } else if chunk_type.cmp(&CHUNK_TYPE_COLOR_SPACE_INFORMATION).is_eq() {
                 let chunk: ColorSpaceInformation = decode_chunk_color_space_information(chunk_content, u_chunk_length);
-                println!("\n{}", chunk.to_string());
+                println!("{}", chunk.to_string());
             } else if chunk_type.cmp(&CHUNK_TYPE_PHYSICAL_DIMENSIONS).is_eq() {
                 let chunk: PhysicalDimensions = decode_chunk_physical_dimensions(chunk_content, u_chunk_length);
-                println!("\n{}", chunk.to_string());
+                println!("{}", chunk.to_string());
             } else if chunk_type.cmp(&CHUNK_TYPE_LAST_MODIFICATION_DATE).is_eq() {
                 let chunk: LastModificationDate = decode_chunk_last_modification_date(chunk_content, u_chunk_length);
-                println!("\n{}", chunk.to_string());
+                println!("{}", chunk.to_string());
             } else if chunk_type.cmp(&CHUNK_TYPE_BACKGROUND_COLOR).is_eq() {
                 let chunk: BackgroundColor = decode_chunk_background_color(chunk_content, u_chunk_length);
-                println!("\n{}", chunk.to_string());
+                println!("{}", chunk.to_string());
+            } else if chunk_type.cmp(&CHUNK_TYPE_TEXT).is_eq() {
+                let chunk: Text = decode_chunk_text(chunk_content, u_chunk_length);
+                println!("{}", chunk.to_string());
             } else if chunk_type.cmp(&CHUNK_TYPE_IDAT).is_eq() {
                 println!("ImageDATA");
+                
                 let chunk: ImageData = decode_chunk_image_data(chunk_content, u_chunk_length);
-                // println!("\n{}", chunk.to_string());
+                println!("\n{}", chunk.to_string());
+            } else if chunk_type.cmp(&CHUNK_TYPE_END).is_eq() {
+                let chunk: End = decode_chunk_end(chunk_content, u_chunk_length);
+                println!("{}", chunk.to_string());
+                break;
             } else {
                 println!("Chunk type is not recognized");
                 for b in chunk_type {
